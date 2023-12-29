@@ -1,64 +1,93 @@
+using System.Collections.Concurrent;
+
 public class Analyzer
 {
     private Dictionary<string, string> _guidToPath = new();
 
-    public static List<Dictionary<string, string>> Dumper(string filePath, string endPath)
+    private List<Dictionary<string, string>> _blockData = [];
+
+    public void Dumper(string filePath, string endPath)
     {
         var directories = Directory.GetDirectories(filePath);
         var files = Directory.GetFiles(filePath);
-        var blockData = new List<Dictionary<string, string>>();
-        foreach (var file in files)
+    
+        Parallel.ForEach(files, file =>
         {
-            if (!file.EndsWith(".unity")) continue;
+            if (!file.EndsWith(".unity")) return;
+
             var (data, block) = Builder.SplitBlocks(file);
-            blockData.Add(data);
+            lock (_blockData)
+            {
+                _blockData.Add(data);
+            }
+
             var fileDump = Builder.PrepareAndBuild(ref data, ref block);
-            File.WriteAllLines(endPath + "/" + file.Substring(file.LastIndexOf('/') + 1) + ".dump", fileDump);
-        }
-
-        foreach (var directory in directories) blockData.AddRange(Dumper(directory, endPath));
-        return blockData;
-    }
-
-    public void FillGuid(string filePath, string endPath, ref List<Dictionary<string, string>> blockData,
-        string startPath)
-    {
-        var directories = Directory.GetDirectories(filePath);
-        var files = Directory.GetFiles(filePath);
-        var builder = new Builder();
-        foreach (var file in files)
+            lock (_blockData)
+            {
+                File.WriteAllLines(endPath + "/" + file.Substring(file.LastIndexOf('/') + 1) + ".dump", fileDump);
+            }
+        });
+        Parallel.ForEach(directories, directory =>
         {
-            if (!file.EndsWith(".cs")) continue;
-            _guidToPath[builder.CsFileId(file + ".meta")] = file;
-        }
-
-        foreach (var directory in directories) FillGuid(directory, endPath, ref blockData, startPath);
+            Dumper(directory, endPath);
+        });
     }
 
-    public void ScriptFinder(string filePath, string endPath, ref List<Dictionary<string, string>> blockData,
-        string startPath)
+    public void FillGuid(string filePath)
     {
         var directories = Directory.GetDirectories(filePath);
         var files = Directory.GetFiles(filePath);
         var builder = new Builder();
-        TextWriter scripts = new StreamWriter(endPath + "/UnusedScripts.csv", true);
+        
+        var concurrentGuidToPath = new ConcurrentDictionary<string, string>();
+
+        Parallel.ForEach(files, file =>
+        {
+            if (!file.EndsWith(".cs")) return;
+            
+            var fileId = builder.CsFileId(file + ".meta");
+            
+            concurrentGuidToPath.AddOrUpdate(fileId, file, (_, _) => file);
+        });
+        
+        foreach (var kvp in concurrentGuidToPath)
+        {
+            lock (_guidToPath)
+            {
+                _guidToPath[kvp.Key] = kvp.Value;
+            }
+        }
+        Parallel.ForEach(directories, FillGuid);
+    }
+
+    public void ScriptFinder(string filePath, string endPath, string startPath)
+    {
+        var directories = Directory.GetDirectories(filePath);
+        var files = Directory.GetFiles(filePath);
+        var builder = new Builder();
         if (startPath == filePath)
         {
-            scripts.Close();
-            scripts = new StreamWriter(endPath + "/UnusedScripts.csv");
-            scripts.Write("Relative Path,GUID\n");
-            scripts.Close();
-            scripts = new StreamWriter(endPath + "/UnusedScripts.csv", true);
+            lock (_guidToPath)
+            {
+                File.WriteAllText(endPath + "/UnusedScripts.csv", "Relative Path,GUID\n");
+            }
         }
-
-        foreach (var file in files)
+        Parallel.ForEach(files, file =>
         {
-            if (!file.EndsWith(".cs")) continue;
-            if (!builder.FindInScript(builder.CsFileId(file + ".meta"), ref blockData, ref _guidToPath))
-                scripts.Write(file.Substring(startPath.Length) + "," + builder.CsFileId(file + ".meta") + "\n");
+            if (!file.EndsWith(".cs")) return;
+            var localScripts = new StringWriter();
+            if (!builder.FindInScript(builder.CsFileId(file + ".meta"), ref _blockData, ref _guidToPath))
+            {
+                localScripts.Write(file.Substring(startPath.Length) + "," + builder.CsFileId(file + ".meta") + "\n");
+            }
+            lock (_guidToPath)
+            {
+                File.AppendAllText(endPath + "/UnusedScripts.csv", localScripts.ToString());
+            }
+        });
+        foreach (var directory in directories) 
+        {
+            ScriptFinder(directory, endPath, startPath);
         }
-
-        scripts.Close();
-        foreach (var directory in directories) ScriptFinder(directory, endPath, ref blockData, startPath);
     }
 }
