@@ -1,134 +1,127 @@
-﻿using Unity_Analyzer;
-using YamlDotNet.Serialization;
-using YamlDotNet.Serialization.NamingConventions;
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
+﻿using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
-using System;
-using System.Linq;
+using Unity_Analyzer_Structs;
+using YamlDotNet.Serialization;
 
 public class Builder
 {
-    public static List<string> BuildHierarchy(string fileID, ref Dictionary<string, string> Data, int level = 0)
+    private static List<string> BuildHierarchy(string fileId, ref Dictionary<string, string> data, int level = 0)
     {
         var deserializer = new DeserializerBuilder().IgnoreUnmatchedProperties().Build();
-        var transform  = deserializer.Deserialize<TransformWrapper>(Data[fileID]);
-        var gameObject = deserializer.Deserialize<GameObjectWrapper>(Data[transform.Transform.m_GameObject.fileID]);
-        List<string> Hierarchy = new List<string>();
-        Hierarchy.Add(String.Concat(Enumerable.Repeat("--", level))+gameObject.GameObject.m_Name);
+        var transform = deserializer.Deserialize<TransformWrapper>(data[fileId]);
+        var gameObject = deserializer.Deserialize<GameObjectWrapper>(data[transform.Transform.m_GameObject.fileID]);
+        List<string> hierarchy =
+        [
+            string.Concat(Enumerable.Repeat("--", level)) + gameObject.GameObject.m_Name
+        ];
         foreach (var child in transform.Transform.m_Children)
         {
-            List<string> childHierarchy = BuildHierarchy(child.fileID, ref Data, level + 1);
-            Hierarchy.AddRange(childHierarchy);
+            var childHierarchy = BuildHierarchy(child.fileID, ref data, level + 1);
+            hierarchy.AddRange(childHierarchy);
         }
-        return Hierarchy;
+
+        return hierarchy;
     }
 
     public static (Dictionary<string, string>, string) SplitBlocks(string filePath)
     {
-        var startOfBlockTag = "--- !u!";
+        const string startOfBlockTag = "--- !u!";
 
-        using StreamReader reader = new StreamReader(filePath);
+        using var reader = new StreamReader(filePath);
 
-        Dictionary<string, string> Data = new Dictionary<string, string>();
-        string now = "", block = "", id = "";
+        var data = new Dictionary<string, string>();
+        string block = "", id = "";
         while (!reader.EndOfStream)
         {
-            now = reader.ReadLine();
-            if (now.StartsWith("%")) continue;
+            var now = reader.ReadLine();
+            if (now == null) break;
+            if (now.StartsWith('%')) continue;
             if (now.StartsWith(startOfBlockTag))
             {
-                Data[id] = block;
-                id = now.Substring(now.IndexOf("&")+1);
+                data[id] = block;
+                id = now.Substring(now.IndexOf('&') + 1);
                 block = "";
             }
             else
             {
-                block += now+"\n";
+                block += now + "\n";
             }
 
             if (reader.EndOfStream)
             {
-                Data[id] = block;
-                id = now.Substring(now.IndexOf("&")+1);
+                data[id] = block;
+                id = now.Substring(now.IndexOf('&') + 1);
             }
         }
 
-        return (Data, block);
+        return (data, block);
     }
-    public static List<string> PrepareAndBuild(ref Dictionary<string, string> Data, ref string block)
+
+    public static List<string> PrepareAndBuild(ref Dictionary<string, string> data, ref string block)
     {
         var deserializer = new DeserializerBuilder().IgnoreUnmatchedProperties().Build();
-        var sceneRoots  = deserializer.Deserialize<SceneRootsWrapper>(block);
+        var sceneRoots = deserializer.Deserialize<SceneRootsWrapper>(block);
         var hierarchy = new List<string>();
         foreach (var root in sceneRoots.SceneRoots.m_Roots)
         {
-            var rootHierarchy = BuildHierarchy(root.fileID, ref Data);
+            var rootHierarchy = BuildHierarchy(root.fileID, ref data);
             hierarchy.AddRange(rootHierarchy);
         }
 
         return hierarchy;
     }
-    
+
     public string CsFileId(string filePath)
     {
-        using StreamReader reader = new StreamReader(filePath);
+        using var reader = new StreamReader(filePath);
         var meta = reader.ReadToEnd();
         var deserializer = new DeserializerBuilder().IgnoreUnmatchedProperties().Build();
-        var csfile  = deserializer.Deserialize<CsFileWrapper>(meta);
-        return csfile.guid;
-
+        var csFile = deserializer.Deserialize<CsFileWrapper>(meta);
+        return csFile.guid;
     }
-    
-    static T DeserializeYaml<T>(string yamlData)
+
+    private static T DeserializeYaml<T>(string yamlData)
     {
         var deserializer = new DeserializerBuilder().Build();
         return deserializer.Deserialize<T>(yamlData);
     }
 
-    public bool FindInScript(string guid, ref List<Dictionary<string, string>> Datas, ref Dictionary<string, string> GuidToPath)
+    public bool FindInScript(string guid, ref List<Dictionary<string, string>> blockData,
+        ref Dictionary<string, string> guidToPath)
     {
-        foreach (var Data in Datas)
+        foreach (var oneBlockData in blockData)
+        foreach (var block in oneBlockData)
         {
-            foreach (var block in Data)
-            {
-                if (!block.Value.StartsWith("MonoBehaviour")) continue;
-                
-                var data = DeserializeYaml<Dictionary<string, dynamic>>(block.Value);
-                if (data["MonoBehaviour"]["m_Script"]["guid"] == guid)
-                {
-                    return true;
-                }
-                foreach (var scriptPair in data["MonoBehaviour"])
-                {
-                    if (scriptPair.Key == "m_Script"|| scriptPair.Value == null || scriptPair.Value is not Dictionary<object, object> || data["MonoBehaviour"]["m_Script"]["guid"] == null)
-                        continue;
-                    if (!scriptPair.Value.ContainsKey("guid") || scriptPair.Value["guid"]!=guid)
-                        continue;
-                    string filepath = GuidToPath[data["MonoBehaviour"]["m_Script"]["guid"]];
-                    string type = GuidToPath[guid].Substring(GuidToPath[guid].LastIndexOf('/') + 1);
-                    type = type.Substring(0, type.Length - 3);
-                    using StreamReader reader = new StreamReader(filepath);
-                    var cscode = reader.ReadToEnd();
-                    SyntaxTree syntaxTree = CSharpSyntaxTree.ParseText(cscode);
-                    CompilationUnitSyntax root = syntaxTree.GetCompilationUnitRoot();
-                    var variableDeclarations = root.DescendantNodes().OfType<VariableDeclarationSyntax>();
+            if (!block.Value.StartsWith("MonoBehaviour")) continue;
 
-                    foreach (var declaration in variableDeclarations)
-                    {
-                        foreach (var variable in declaration.Variables)
-                        {
-                            if (variable.Identifier.Text == scriptPair.Key &&
-                                declaration.Type.ToString() == type)
-                            {
-                                return true;
-                            }
-                        }
-                    }
-                }
+            var data = DeserializeYaml<Dictionary<string, dynamic>>(block.Value);
+            if (data["MonoBehaviour"]["m_Script"]["guid"] == guid) return true;
+            foreach (var scriptPair in data["MonoBehaviour"])
+            {
+                if (scriptPair.Key == "m_Script" || scriptPair.Value == null ||
+                    scriptPair.Value is not Dictionary<object, object> ||
+                    data["MonoBehaviour"]["m_Script"]["guid"] == null)
+                    continue;
+                if (!scriptPair.Value.ContainsKey("guid") || scriptPair.Value["guid"] != guid)
+                    continue;
+                string filepath = guidToPath[data["MonoBehaviour"]["m_Script"]["guid"]];
+                var type = guidToPath[guid].Substring(guidToPath[guid].LastIndexOf('/') + 1);
+                type = type.Substring(0, type.Length - 3);
+                using var reader = new StreamReader(filepath);
+                var csCode = reader.ReadToEnd();
+                var syntaxTree = CSharpSyntaxTree.ParseText(csCode);
+                var root = syntaxTree.GetCompilationUnitRoot();
+                var variableDeclarations = root.DescendantNodes().OfType<VariableDeclarationSyntax>();
+
+                if ((from declaration in variableDeclarations
+                        from variable in declaration.Variables
+                        where variable.Identifier.Text == scriptPair.Key &&
+                              declaration.Type.ToString() == type
+                        select declaration).Any())
+                    return true;
             }
         }
+
         return false;
     }
 }
-
