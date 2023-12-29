@@ -6,7 +6,7 @@ Test Task -- Implemented
 
 Bonus Task 1 -- Implemented
 
-Bonus Task 2 -- TODO
+Bonus Task 2 -- Implemented (parallel traversal for files; I believe it will improve performance when there are many files.)
 
 So, essentially, this code checks for ScenesRoot and recursively goes into children, building a hierarchy. 
 It then memorizes GUIDs and all CS files. Next, it checks if either the GUID of the script in m_script exists or if there's a field with the GUID of the script. 
